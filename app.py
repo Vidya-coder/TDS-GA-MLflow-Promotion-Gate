@@ -67,6 +67,7 @@ def parse_timestamp(value: Any):
 
     try:
         normalized = value
+
         if normalized.endswith("Z"):
             normalized = normalized[:-1] + "+00:00"
 
@@ -98,6 +99,7 @@ def validate_version_id(value: Any) -> bool:
 
 def add_gate(failures: dict, version: str, code: str):
     failures.setdefault(version, [])
+
     if code not in failures[version]:
         failures[version].append(code)
 
@@ -132,6 +134,7 @@ def validate_policy(policy: Any) -> bool:
     for name, floor in required_slices.items():
         if not isinstance(name, str):
             return False
+
         if not is_unit_interval(floor):
             return False
 
@@ -154,9 +157,9 @@ def validate_policy(policy: Any) -> bool:
 
 def timestamp_age_seconds(as_of: datetime, created_at: datetime):
     """
-    Returns age in seconds without constructing a timedelta from the
-    policy's maxAgeSeconds. This avoids OverflowError for the full
-    allowed safe-integer range.
+    Calculate age without constructing timedelta from policy values.
+    This avoids OverflowError when maxAgeSeconds is near the
+    JavaScript safe-integer limit.
     """
     return (as_of - created_at).total_seconds()
 
@@ -167,6 +170,11 @@ def evaluate_version(
     policy: dict,
     failures: dict,
 ):
+    """
+    Returns:
+        (valid_id, version_id, eligible)
+    """
+
     if not isinstance(version_obj, dict):
         return False, None, False
 
@@ -182,16 +190,22 @@ def evaluate_version(
     evaluation = version_obj.get("evaluation")
 
     if not isinstance(evaluation, dict):
-        add_gate(failures, version, "MISSING_EVALUATION")
+        add_gate(
+            failures,
+            version,
+            "MISSING_EVALUATION",
+        )
         return True, version, False
 
     codes = []
 
     # ------------------------------------------------------------
-    # Timestamp evidence
+    # Timestamp
     # ------------------------------------------------------------
 
-    created_at = parse_timestamp(evaluation.get("createdAt"))
+    created_at = parse_timestamp(
+        evaluation.get("createdAt")
+    )
 
     if created_at is None:
         codes.append("INVALID_TIMESTAMP")
@@ -199,7 +213,10 @@ def evaluate_version(
         if created_at > as_of:
             codes.append("FUTURE_EVALUATION")
         else:
-            age = timestamp_age_seconds(as_of, created_at)
+            age = timestamp_age_seconds(
+                as_of,
+                created_at,
+            )
 
             if age > policy["maxAgeSeconds"]:
                 codes.append("STALE_EVALUATION")
@@ -208,8 +225,13 @@ def evaluate_version(
     # Artifact lineage
     # ------------------------------------------------------------
 
-    registered_artifact = version_obj.get("artifactDigest")
-    evaluated_artifact = evaluation.get("artifactDigest")
+    registered_artifact = version_obj.get(
+        "artifactDigest"
+    )
+
+    evaluated_artifact = evaluation.get(
+        "artifactDigest"
+    )
 
     if (
         not isinstance(registered_artifact, str)
@@ -222,14 +244,20 @@ def evaluate_version(
     # Dataset lineage
     # ------------------------------------------------------------
 
-    if evaluation.get("datasetDigest") != policy["datasetDigest"]:
+    if (
+        evaluation.get("datasetDigest")
+        != policy["datasetDigest"]
+    ):
         codes.append("DATASET_MISMATCH")
 
     # ------------------------------------------------------------
     # Schema lineage
     # ------------------------------------------------------------
 
-    if evaluation.get("schemaDigest") != policy["schemaDigest"]:
+    if (
+        evaluation.get("schemaDigest")
+        != policy["schemaDigest"]
+    ):
         codes.append("SCHEMA_MISMATCH")
 
     # ------------------------------------------------------------
@@ -244,7 +272,11 @@ def evaluate_version(
     latency_finite = is_finite_number(latency)
     size_finite = is_finite_number(size)
 
-    if not accuracy_finite or not latency_finite or not size_finite:
+    if (
+        not accuracy_finite
+        or not latency_finite
+        or not size_finite
+    ):
         codes.append("NON_FINITE")
 
     # ------------------------------------------------------------
@@ -273,11 +305,20 @@ def evaluate_version(
     # ------------------------------------------------------------
 
     if is_unit_interval(accuracy):
-        if float(accuracy) < float(policy["accuracyFloor"]):
+        if (
+            float(accuracy)
+            < float(policy["accuracyFloor"])
+        ):
             codes.append("ACCURACY_FLOOR")
 
-    if latency_finite and float(latency) >= 0:
-        if float(latency) > float(policy["maxLatencyMs"]):
+    if (
+        latency_finite
+        and float(latency) >= 0
+    ):
+        if (
+            float(latency)
+            > float(policy["maxLatencyMs"])
+        ):
             codes.append("LATENCY_LIMIT")
 
     if size_is_valid_integer:
@@ -292,11 +333,16 @@ def evaluate_version(
 
     if not isinstance(slices, dict):
         for name in policy["requiredSlices"]:
-            codes.append(f"MISSING_SLICE:{name}")
+            codes.append(
+                f"MISSING_SLICE:{name}"
+            )
     else:
         for name, floor in policy["requiredSlices"].items():
+
             if name not in slices:
-                codes.append(f"MISSING_SLICE:{name}")
+                codes.append(
+                    f"MISSING_SLICE:{name}"
+                )
                 continue
 
             value = slices[name]
@@ -306,20 +352,31 @@ def evaluate_version(
                 continue
 
             if not (0 <= float(value) <= 1):
-                codes.append(f"SLICE_RANGE:{name}")
+                codes.append(
+                    f"SLICE_RANGE:{name}"
+                )
                 continue
 
             if float(value) < float(floor):
-                codes.append(f"SLICE_FLOOR:{name}")
+                codes.append(
+                    f"SLICE_FLOOR:{name}"
+                )
 
-    # UTF-8 ordering for valid Unicode strings is preserved by Python
-    # Unicode code-point ordering.
+    # Unique and deterministic ordering.
     codes = sorted(set(codes))
 
     for code in codes:
-        add_gate(failures, version, code)
+        add_gate(
+            failures,
+            version,
+            code,
+        )
 
-    return True, version, len(codes) == 0
+    return (
+        True,
+        version,
+        len(codes) == 0,
+    )
 
 
 def normalize_failures(failures: dict):
@@ -328,15 +385,39 @@ def normalize_failures(failures: dict):
     for version, codes in failures.items():
         result[version] = sorted(set(codes))
 
+    def version_sort_key(item):
+        version = item[0]
+
+        # Valid canonical numeric versions first,
+        # sorted numerically.
+        if validate_version_id(version):
+            return (
+                0,
+                int(version),
+            )
+
+        # Invalid string version IDs must still be returned
+        # deterministically without attempting int(version).
+        if isinstance(version, str):
+            return (
+                1,
+                version.encode("utf-8"),
+            )
+
+        return (
+            2,
+            str(version).encode("utf-8"),
+        )
+
     return dict(
         sorted(
             result.items(),
-            key=lambda item: int(item[0]),
+            key=version_sort_key,
         )
     )
 
 
-def response(
+def make_response(
     action: str,
     champion_version: str,
     selected_version,
@@ -350,7 +431,9 @@ def response(
         "championVersion": champion_version,
         "selectedVersion": selected_version,
         "eligibleVersions": eligible_versions,
-        "failedGates": normalize_failures(failures),
+        "failedGates": normalize_failures(
+            failures
+        ),
         "aliasMutation": alias_mutation,
         "evidence": evidence,
     }
@@ -363,9 +446,12 @@ def healthz():
 
 @app.post("/promote")
 async def promote(request: Request):
+
     # ------------------------------------------------------------
-    # Parse JSON manually so invalid JSON / unexpected top-level
-    # structures cannot become an unhandled server exception.
+    # Parse JSON explicitly.
+    #
+    # This ensures malformed JSON does not become an unhandled
+    # FastAPI exception/500.
     # ------------------------------------------------------------
 
     try:
@@ -374,7 +460,7 @@ async def promote(request: Request):
         return invalid_input()
 
     # ------------------------------------------------------------
-    # Required top-level shape
+    # Top-level request validation
     # ------------------------------------------------------------
 
     if not isinstance(payload, dict):
@@ -392,7 +478,10 @@ async def promote(request: Request):
     if "championVersion" not in payload:
         return invalid_input()
 
-    if not isinstance(payload["championVersion"], str):
+    if not isinstance(
+        payload["championVersion"],
+        str,
+    ):
         return invalid_input()
 
     if "asOf" not in payload:
@@ -403,18 +492,23 @@ async def promote(request: Request):
     if not validate_policy(policy):
         return invalid_input()
 
-    as_of = parse_timestamp(payload["asOf"])
+    as_of = parse_timestamp(
+        payload["asOf"]
+    )
 
     if as_of is None:
         return invalid_input()
 
-    champion_version = payload["championVersion"]
+    champion_version = payload[
+        "championVersion"
+    ]
+
     versions = payload["versions"]
 
     failures = {}
 
     # ------------------------------------------------------------
-    # First pass:
+    # First pass.
     #
     # Reject invalid/noncanonical IDs and duplicate occurrences
     # before constructing the lookup map.
@@ -424,18 +518,21 @@ async def promote(request: Request):
     normalized_versions = []
 
     for item in versions:
+
         if not isinstance(item, dict):
             continue
 
         version = item.get("version")
 
         if not validate_version_id(version):
+
             if isinstance(version, str):
                 add_gate(
                     failures,
                     version,
                     "INVALID_VERSION",
                 )
+
             continue
 
         if version in seen:
@@ -450,11 +547,13 @@ async def promote(request: Request):
         normalized_versions.append(item)
 
     # ------------------------------------------------------------
-    # Champion ID itself must be canonical.
+    # Champion must itself be canonical.
     # ------------------------------------------------------------
 
-    if not validate_version_id(champion_version):
-        return response(
+    if not validate_version_id(
+        champion_version
+    ):
+        return make_response(
             "block",
             champion_version,
             None,
@@ -465,7 +564,8 @@ async def promote(request: Request):
         )
 
     # ------------------------------------------------------------
-    # Build lookup map only after duplicate/noncanonical rejection.
+    # Construct lookup map only after duplicate and invalid
+    # occurrences have been rejected.
     # ------------------------------------------------------------
 
     version_map = {
@@ -473,9 +573,9 @@ async def promote(request: Request):
         for item in normalized_versions
     }
 
-    # Champion must identify a listed version.
+    # Champion must identify one listed version.
     if champion_version not in version_map:
-        return response(
+        return make_response(
             "block",
             champion_version,
             None,
@@ -486,18 +586,21 @@ async def promote(request: Request):
         )
 
     # ------------------------------------------------------------
-    # Evaluate all accepted unique versions.
+    # Evaluate every valid unique version.
     # ------------------------------------------------------------
 
     eligible = []
     eligible_set = set()
 
     for item in normalized_versions:
-        valid_id, version, is_eligible = evaluate_version(
-            item,
-            as_of,
-            policy,
-            failures,
+
+        valid_id, version, is_eligible = (
+            evaluate_version(
+                item,
+                as_of,
+                policy,
+                failures,
+            )
         )
 
         if valid_id and is_eligible:
@@ -509,12 +612,13 @@ async def promote(request: Request):
     # ------------------------------------------------------------
 
     if champion_version not in eligible_set:
+
         eligible_versions = sorted(
             eligible_set,
             key=lambda value: int(value),
         )
 
-        return response(
+        return make_response(
             "block",
             champion_version,
             None,
@@ -527,10 +631,10 @@ async def promote(request: Request):
     # ------------------------------------------------------------
     # Deterministic ranking:
     #
-    # accuracy DESC
-    # latency ASC
-    # size ASC
-    # numeric version ASC
+    # 1. accuracy descending
+    # 2. latency ascending
+    # 3. size ascending
+    # 4. numeric version ascending
     # ------------------------------------------------------------
 
     def ranking_key(item):
@@ -543,28 +647,37 @@ async def promote(request: Request):
             int(item["version"]),
         )
 
-    eligible.sort(key=ranking_key)
+    eligible.sort(
+        key=ranking_key
+    )
 
     eligible_versions = [
         item["version"]
         for item in eligible
     ]
 
-    champion = version_map[champion_version]
-    champion_evaluation = champion["evaluation"]
+    champion = version_map[
+        champion_version
+    ]
+
+    champion_evaluation = champion[
+        "evaluation"
+    ]
 
     # ------------------------------------------------------------
-    # Find the best eligible challenger.
+    # Find the highest-ranked eligible challenger.
     # ------------------------------------------------------------
 
     challengers = [
         item
         for item in eligible
-        if item["version"] != champion_version
+        if item["version"]
+        != champion_version
     ]
 
+    # No challenger -> retain champion.
     if not challengers:
-        return response(
+        return make_response(
             "retain",
             champion_version,
             champion_version,
@@ -575,21 +688,30 @@ async def promote(request: Request):
         )
 
     challenger = challengers[0]
-    challenger_evaluation = challenger["evaluation"]
+
+    challenger_evaluation = challenger[
+        "evaluation"
+    ]
 
     # ------------------------------------------------------------
-    # Improvement must be rounded to exactly 12 decimal places
-    # before comparing with minImprovement.
+    # Improvement is rounded to 12 decimal places BEFORE
+    # comparing with minImprovement.
     # ------------------------------------------------------------
 
     improvement = round(
-        float(challenger_evaluation["accuracy"])
-        - float(champion_evaluation["accuracy"]),
+        float(
+            challenger_evaluation["accuracy"]
+        )
+        - float(
+            champion_evaluation["accuracy"]
+        ),
         12,
     )
 
-    if improvement >= float(policy["minImprovement"]):
-        return response(
+    if improvement >= float(
+        policy["minImprovement"]
+    ):
+        return make_response(
             "promote",
             champion_version,
             challenger["version"],
@@ -597,12 +719,15 @@ async def promote(request: Request):
             failures,
             {
                 "alias": "champion",
-                "version": challenger["version"],
+                "version": challenger[
+                    "version"
+                ],
             },
             challenger_evaluation,
         )
 
-    return response(
+    # Improvement insufficient -> retain champion.
+    return make_response(
         "retain",
         champion_version,
         champion_version,
