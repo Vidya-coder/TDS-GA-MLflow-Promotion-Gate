@@ -232,9 +232,13 @@ def normalize_failures(
         sorted(
             result.items(),
             key=lambda item: (
-                int(item[0])
-                if validate_version_id(item[0])
-                else item[0]
+                0,
+                int(item[0]),
+            )
+            if validate_version_id(item[0])
+            else (
+                1,
+                item[0],
             ),
         )
     )
